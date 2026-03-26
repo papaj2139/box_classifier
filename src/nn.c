@@ -3,6 +3,11 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#ifdef USE_OPENCL
+#include "opencl_backend.h"
+#endif
+
+static const char *layer_type_name(LayerType type);
 
 //model lifecycle
 NeuralNetwork *nn_create(void) {
@@ -87,10 +92,22 @@ void nn_zero_gradients(NeuralNetwork *nn) {
 }
 
 //batched loss functions
+float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
+                                  Tensor *grad_out, TrainingMetrics *metrics);
+
 float loss_bce_batch(Tensor *predicted, Tensor *target, Tensor *grad_out) {
+    return loss_bce_batch_with_metrics(predicted, target, grad_out, NULL);
+}
+
+float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
+                                 Tensor *grad_out, TrainingMetrics *metrics) {
     size_t B = predicted->shape[0];
     float total_loss = 0.0f;
     float scale = 1.0f / (float)B;  //scale gradients to match averaged loss
+
+#ifdef USE_OPENCL
+    tensor_to_cpu(predicted);
+#endif
     
     for (size_t b = 0; b < B; b++) {
         float p = predicted->data[b];
@@ -107,8 +124,22 @@ float loss_bce_batch(Tensor *predicted, Tensor *target, Tensor *grad_out) {
         if (grad_out) {
             grad_out->data[b] = scale * (p - t) / (p * (1.0f - p));
         }
+
+        if (metrics) {
+            int pred_class = p >= 0.5f ? 1 : 0;
+            int true_class = t >= 0.5f ? 1 : 0;
+            if (pred_class == true_class) {
+                metrics->correct++;
+            }
+        }
     }
-    
+
+    if (metrics) {
+        metrics->loss += total_loss;
+        metrics->total += B;
+        metrics->accuracy = metrics->total ? (float)metrics->correct / (float)metrics->total : 0.0f;
+    }
+
     return total_loss / (float)B;
 }
 
@@ -119,6 +150,10 @@ void metrics_reset(TrainingMetrics *m) {
 
 void metrics_update_batch(TrainingMetrics *m, Tensor *pred, Tensor *target, float batch_loss) {
     size_t B = pred->shape[0];
+
+#ifdef USE_OPENCL
+    tensor_to_cpu(pred);
+#endif
     
     m->loss += batch_loss * (float)B;  //accumulate total loss
     m->total += B;
@@ -190,6 +225,10 @@ int nn_save(NeuralNetwork *nn, const char *filepath) {
         
         if (l->type == LAYER_CONV2D) {
             Conv2DLayer *c = (Conv2DLayer *)l->impl;
+#ifdef USE_OPENCL
+            tensor_to_cpu(c->weights);
+            tensor_to_cpu(c->bias);
+#endif
             fwrite(&c->in_channels, sizeof(size_t), 1, f);
             fwrite(&c->out_channels, sizeof(size_t), 1, f);
             fwrite(&c->kernel_size, sizeof(size_t), 1, f);
@@ -199,6 +238,10 @@ int nn_save(NeuralNetwork *nn, const char *filepath) {
             fwrite(c->bias->data, sizeof(float), c->bias->size, f);
         } else if (l->type == LAYER_DENSE) {
             DenseLayer *d = (DenseLayer *)l->impl;
+#ifdef USE_OPENCL
+            tensor_to_cpu(d->weights);
+            tensor_to_cpu(d->bias);
+#endif
             fwrite(&d->in_features, sizeof(size_t), 1, f);
             fwrite(&d->out_features, sizeof(size_t), 1, f);
             fwrite(d->weights->data, sizeof(float), d->weights->size, f);
@@ -247,8 +290,10 @@ NeuralNetwork *nn_load(const char *filepath) {
             Conv2DLayer *c = (Conv2DLayer *)l->impl;
             fread(c->weights->data, sizeof(float), c->weights->size, f);
             fread(c->bias->data, sizeof(float), c->bias->size, f);
-            // Sync to GPU (update with lr=0 just syncs weights)
-            if (l->update) l->update(l, 0.0f);
+#ifdef USE_OPENCL
+            tensor_to_gpu(c->weights);
+            tensor_to_gpu(c->bias);
+#endif
         } else if (type == LAYER_DENSE) {
             size_t in_f, out_f;
             fread(&in_f, sizeof(size_t), 1, f);
@@ -257,8 +302,10 @@ NeuralNetwork *nn_load(const char *filepath) {
             DenseLayer *d = (DenseLayer *)l->impl;
             fread(d->weights->data, sizeof(float), d->weights->size, f);
             fread(d->bias->data, sizeof(float), d->bias->size, f);
-            // Sync to GPU
-            if (l->update) l->update(l, 0.0f);
+#ifdef USE_OPENCL
+            tensor_to_gpu(d->weights);
+            tensor_to_gpu(d->bias);
+#endif
         } else if (type == LAYER_MAXPOOL2D) {
             size_t ps, s;
             fread(&ps, sizeof(size_t), 1, f);

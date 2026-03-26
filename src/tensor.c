@@ -86,6 +86,7 @@ Tensor *tensor_create(size_t ndim, const size_t *shape) {
     
 #ifdef USE_OPENCL
     t->gpu = NULL;
+    t->owns_gpu = 1;
     t->gpu_valid = 0;
     t->cpu_valid = 1;  //CPU data is valid after creation
 #endif
@@ -128,7 +129,7 @@ Tensor *tensor_clone(const Tensor *src) {
 void tensor_destroy(Tensor *t) {
     if (!t) return;
 #ifdef USE_OPENCL
-    if (t->gpu) gpu_buffer_destroy(t->gpu);
+    if (t->gpu && t->owns_gpu) gpu_buffer_destroy(t->gpu);
 #endif
     if (t->owns_data) free(t->data);
     free(t->shape);
@@ -156,6 +157,12 @@ Tensor *tensor_view(Tensor *src) {
     v->size = src->size;
     v->data = src->data;
     v->owns_data = 0;
+#ifdef USE_OPENCL
+    v->gpu = src->gpu;
+    v->owns_gpu = 0;
+    v->gpu_valid = src->gpu_valid;
+    v->cpu_valid = src->cpu_valid;
+#endif
     
     return v;
 }
@@ -192,6 +199,12 @@ Tensor *tensor_reshape(Tensor *src, size_t ndim, const size_t *new_shape) {
     v->size = src->size;
     v->data = src->data;
     v->owns_data = 0;
+#ifdef USE_OPENCL
+    v->gpu = src->gpu;
+    v->owns_gpu = 0;
+    v->gpu_valid = src->gpu_valid;
+    v->cpu_valid = src->cpu_valid;
+#endif
     
     return v;
 }
@@ -367,6 +380,7 @@ void tensor_print(const Tensor *t, const char *name) {
 void tensor_ensure_gpu(Tensor *t) {
     if (!t->gpu) {
         t->gpu = gpu_buffer_create(t->size * sizeof(float));
+        t->owns_gpu = 1;
     }
 }
 

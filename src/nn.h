@@ -30,9 +30,6 @@ size_t nn_count_parameters(NeuralNetwork *nn);
 
 //loss functions (batched)
 //returns mean loss over batch, grad_out is [B, 1]
-float loss_bce_batch(Tensor *predicted, Tensor *target, Tensor *grad_out);
-
-//metrics
 typedef struct {
     float loss;
     float accuracy;
@@ -40,6 +37,11 @@ typedef struct {
     size_t total;
 } TrainingMetrics;
 
+float loss_bce_batch(Tensor *predicted, Tensor *target, Tensor *grad_out);
+float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
+                                  Tensor *grad_out, TrainingMetrics *metrics);
+
+//metrics
 void metrics_reset(TrainingMetrics *m);
 void metrics_update_batch(TrainingMetrics *m, Tensor *pred, Tensor *target, float batch_loss);
 void metrics_print(TrainingMetrics *m, const char *prefix);

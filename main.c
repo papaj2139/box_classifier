@@ -55,27 +55,23 @@ void train_epoch(NeuralNetwork *nn, Dataset *train, TrainingMetrics *metrics) {
     
     while ((actual_batch = dataset_get_batch(train, BATCH_SIZE, &images, &labels)) > 0) {
         batch_num++;
-        
+
         //zero gradients
         nn_zero_gradients(nn);
         
         //forward pass with batch
         Tensor *output = nn_forward(nn, images, 1);
-        
         //compute batched loss and gradients
         Tensor *grad = tensor_create_1d(actual_batch);
-        float batch_loss = loss_bce_batch(output, labels, grad);
-        
-        //update metrics
-        metrics_update_batch(metrics, output, labels, batch_loss);
-        
+        loss_bce_batch_with_metrics(output, labels, grad, metrics);
+
         //backward pass
         //need to reshape grad to [B, 1] for backward through sigmoid
         Tensor *grad_reshaped = tensor_create_2d(actual_batch, 1);
         memcpy(grad_reshaped->data, grad->data, actual_batch * sizeof(float));
         
         nn_backward(nn, grad_reshaped);
-        
+
         //update weights (gradients are averaged over batch inside loss function)
         nn_update(nn, LEARNING_RATE);
         
@@ -106,8 +102,7 @@ void evaluate(NeuralNetwork *nn, Dataset *test, TrainingMetrics *metrics) {
     while ((actual_batch = dataset_get_batch(test, BATCH_SIZE, &images, &labels)) > 0) {
         Tensor *output = nn_forward(nn, images, 0);
         
-        float batch_loss = loss_bce_batch(output, labels, NULL);
-        metrics_update_batch(metrics, output, labels, batch_loss);
+        loss_bce_batch_with_metrics(output, labels, NULL, metrics);
         
         tensor_destroy(images);
         tensor_destroy(labels);
@@ -210,6 +205,9 @@ int main(int argc, char **argv) {
         memcpy(batch->data, img->data, img->size * sizeof(float));
         
         Tensor *output = nn_forward(nn, batch, 0);
+#ifdef USE_OPENCL
+        tensor_to_cpu(output);
+#endif
         float pred = output->data[0];
         
         printf("\nPrediction: %.4f\n", pred);

@@ -76,6 +76,7 @@ typedef struct {
 typedef struct {
     float p;
     Tensor *mask;
+    unsigned int seed;
     int training;
 } DropoutLayer;
 

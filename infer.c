@@ -72,6 +72,9 @@ int main(int argc, char **argv) {
     //run inference
     printf("Running inference...\n\n");
     Tensor *output = nn_forward(nn, batch, 0);
+#ifdef USE_OPENCL
+    tensor_to_cpu(output);
+#endif
     float pred = output->data[0];
     
     //print result

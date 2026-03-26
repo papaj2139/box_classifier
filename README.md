@@ -44,11 +44,21 @@ dataset/wild/
 └── labels.txt      #image paths and labels
 ```
 
+You can generate the dataset with the native C generator:
+
+```bash
+make wildgen
+./generate_wild_dataset --out dataset/wild --empty 10000 --filled 10000
+```
+
+It writes compact 32x32 grayscale PGM files, which the loader already accepts and resizes to the model input size.
+
 ## Build
 
 ```bash
 make              #CPU build (OpenMP)
 make gpu          #GPU build (OpenCL)
+make wildgen      #Build the native dataset generator
 ```
 
 ## Dependencies

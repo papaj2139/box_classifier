@@ -18,6 +18,7 @@ typedef struct {
     
 #ifdef USE_OPENCL
     struct GPUBuffer *gpu; //GPU buffer (NULL if not allocated)
+    int owns_gpu; //should free gpu buffer on destroy
     int gpu_valid; //is GPU copy current?
     int cpu_valid; //is CPU copy current?
 #endif

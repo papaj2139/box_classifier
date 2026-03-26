@@ -17,8 +17,17 @@ typedef struct {
     //compiled kernels
     cl_program program;
     cl_kernel conv2d_forward_kernel;
+    cl_kernel conv2d_forward_winograd_3x3_kernel;
+    cl_kernel conv2d_transform_weights_winograd_3x3_kernel;
     cl_kernel conv2d_backward_input_kernel;
+    cl_kernel conv2d_backward_input_winograd_3x3_kernel;
     cl_kernel conv2d_backward_weights_kernel;
+    cl_kernel conv2d_backward_weights_3x3_kernel;
+    cl_kernel conv2d_backward_weights_3x3_ic1_kernel;
+    cl_kernel conv2d_backward_weights_winograd_3x3_kernel;
+    cl_kernel conv2d_backward_weights_winograd_reduce_kernel;
+    cl_kernel conv2d_backward_weights_tiled_kernel;
+    cl_kernel conv2d_backward_weights_reduce_kernel;
     cl_kernel dense_forward_kernel;
     cl_kernel dense_backward_weights_kernel;
     cl_kernel dense_backward_input_kernel;
@@ -27,6 +36,7 @@ typedef struct {
     cl_kernel relu_backward_kernel;
     cl_kernel sigmoid_forward_kernel;
     cl_kernel sigmoid_backward_kernel;
+    cl_kernel dropout_forward_kernel;
     cl_kernel maxpool_forward_kernel;
     cl_kernel maxpool_backward_kernel;
     cl_kernel sgd_update_kernel;
@@ -66,10 +76,16 @@ void gpu_tensor_to_gpu(GPUTensor *t);
 void gpu_tensor_to_cpu(GPUTensor *t);
 
 //kernel launches
-void opencl_conv2d_forward(GPUBuffer *input, GPUBuffer *weights, GPUBuffer *bias,
+void opencl_conv2d_forward(GPUBuffer *input, GPUBuffer *weights, GPUBuffer *weights_t, GPUBuffer *bias,
                            GPUBuffer *output, size_t B, size_t in_c, size_t out_c,
                            size_t in_h, size_t in_w, size_t out_h, size_t out_w,
                            size_t k, size_t stride, size_t padding);
+
+void opencl_conv2d_backward_input(GPUBuffer *grad_output, GPUBuffer *weights, GPUBuffer *weights_t,
+                                  GPUBuffer *grad_input, size_t B, size_t in_c,
+                                  size_t out_c, size_t in_h, size_t in_w,
+                                  size_t out_h, size_t out_w,
+                                  size_t k, size_t stride, size_t padding);
 
 void opencl_dense_forward(GPUBuffer *input, GPUBuffer *weights, GPUBuffer *bias,
                           GPUBuffer *output, size_t B, size_t in_f, size_t out_f);
@@ -77,7 +93,32 @@ void opencl_dense_forward(GPUBuffer *input, GPUBuffer *weights, GPUBuffer *bias,
 void opencl_relu_forward(GPUBuffer *input, GPUBuffer *output, GPUBuffer *mask, size_t n);
 
 void opencl_sigmoid_forward(GPUBuffer *input, GPUBuffer *output, size_t n);
+void opencl_sigmoid_backward(GPUBuffer *grad_output, GPUBuffer *sigmoid_output,
+                             GPUBuffer *grad_input, size_t n);
+void opencl_dropout_forward(GPUBuffer *input, GPUBuffer *output, GPUBuffer *mask,
+                            float keep_prob, unsigned int seed, size_t n);
+void opencl_dropout_backward(GPUBuffer *grad_output, GPUBuffer *mask,
+                             GPUBuffer *grad_input, size_t n);
 
-#endif // USE_OPENCL
+void opencl_conv2d_backward_weights(GPUBuffer *input_cache, GPUBuffer *grad_output,
+                                    GPUBuffer *d_weights, GPUBuffer *d_bias,
+                                    size_t B, size_t in_c, size_t out_c,
+                                    size_t in_h, size_t in_w, size_t out_h, size_t out_w,
+                                    size_t k, size_t stride, size_t padding);
 
-#endif // OPENCL_BACKEND_H
+void opencl_conv2d_transform_weights_winograd_3x3(GPUBuffer *weights, GPUBuffer *weights_t,
+                                                  size_t out_c, size_t in_c, int reverse);
+
+void opencl_dense_backward_weights(GPUBuffer *input_cache, GPUBuffer *grad_output,
+                                   GPUBuffer *d_weights, size_t B, size_t in_f, size_t out_f);
+
+void opencl_dense_backward_bias(GPUBuffer *grad_output, GPUBuffer *d_bias,
+                                size_t B, size_t out_f);
+
+void opencl_sgd_update(GPUBuffer *weights, GPUBuffer *gradients, float lr, size_t n);
+
+void opencl_zero_buffer(GPUBuffer *buffer, size_t n);
+
+#endif //USE_OPENCL
+
+#endif //OPENCL_BACKEND_H

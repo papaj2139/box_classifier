@@ -17,7 +17,7 @@ LIB_OBJ = $(LIB_SRC:.c=.o)
 TRAINER = box_classifier
 INFERENCER = model
 
-.PHONY: all clean run gpu infer debug
+.PHONY: all clean run gpu infer debug wildgen
 
 all: $(TRAINER) $(INFERENCER)
 
@@ -49,8 +49,17 @@ run: $(TRAINER)
 infer: $(INFERENCER)
 	./$(INFERENCER) --img $(IMG)
 
+# Wild dataset generator
+wildgen: generate_wild_dataset
+
+generate_wild_dataset: generate_wild_dataset.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+generate_wild_dataset.o: generate_wild_dataset.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 clean:
-	rm -f *.o src/*.o $(TRAINER) $(INFERENCER)
+	rm -f *.o src/*.o $(TRAINER) $(INFERENCER) generate_wild_dataset
 
 # Dependencies
 main.o: main.c src/nn.h src/data.h
