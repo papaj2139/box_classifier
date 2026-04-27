@@ -1,3 +1,5 @@
 dataset/
 *.py
 *.bin
+*.o
+box_classifier

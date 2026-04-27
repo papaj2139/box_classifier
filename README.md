@@ -10,15 +10,15 @@ Built to prove my friend that CNNs are better than standard OMR shit
 Standard CNN for binary image classification:
 
 ```
-Input (64×64 grayscale)
+Input (32×32 grayscale)
     ↓
 Conv2D (32 filters, 3×3) → ReLU → MaxPool (2×2)
     ↓
-Conv2D (64 filters, 3×3) → ReLU → MaxPool (2×2)
+Conv2D (128 filters, 3×3) → ReLU → MaxPool (2×2)
     ↓
-Flatten → Dense (512) → ReLU → Dropout (30%)
+GlobalAvgPool → Dense (512) → ReLU → Dropout (30%)
     ↓
-Dense (1) → Sigmoid → Output (0=empty, 1=filled)
+Dense (1) → Logits → Sigmoid at inference → Output (0=empty, 1=filled)
 ```
 
 ## Quick Start
