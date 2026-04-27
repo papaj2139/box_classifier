@@ -7,6 +7,11 @@
 #include "opencl_backend.h"
 #endif
 
+#define ADAM_BETA1 0.9f
+#define ADAM_BETA2 0.999f
+#define ADAM_EPS 1e-8f
+#define ADAM_WD 0.01f
+
 size_t calc_output_size(size_t input_size, size_t kernel_size, 
                         size_t stride, size_t padding) {
     return (input_size + 2 * padding - kernel_size) / stride + 1;
@@ -22,6 +27,10 @@ typedef struct {
     GPUBuffer *bias_gpu;
     GPUBuffer *d_weights_gpu;
     GPUBuffer *d_bias_gpu;
+    GPUBuffer *m_weights_gpu;
+    GPUBuffer *v_weights_gpu;
+    GPUBuffer *m_bias_gpu;
+    GPUBuffer *v_bias_gpu;
     GPUBuffer *input_gpu;
     GPUBuffer *output_gpu;
 #endif
@@ -230,22 +239,41 @@ static void conv2d_zero_grad(Layer *self) {
 #endif
 }
 
-static void conv2d_update(Layer *self, float lr) {
+static void conv2d_update(Layer *self, float lr, size_t t) {
     Conv2DLayerGPU *lg = (Conv2DLayerGPU *)self->impl;
     Conv2DLayer *l = &lg->base;
 
+    float m_corr = 1.0f / (1.0f - powf(ADAM_BETA1, (float)t));
+    float v_corr = 1.0f / (1.0f - powf(ADAM_BETA2, (float)t));
+
 #ifdef USE_OPENCL
-    opencl_sgd_update(lg->weights_gpu, lg->d_weights_gpu, lr, l->weights->size);
-    opencl_sgd_update(lg->bias_gpu, lg->d_bias_gpu, lr, l->bias->size);
+    opencl_adamw_update(lg->weights_gpu, lg->d_weights_gpu, lg->m_weights_gpu, lg->v_weights_gpu, 
+                        lr, ADAM_BETA1, ADAM_BETA2, ADAM_EPS, ADAM_WD, m_corr, v_corr, l->weights->size);
+    opencl_adamw_update(lg->bias_gpu, lg->d_bias_gpu, lg->m_bias_gpu, lg->v_bias_gpu, 
+                        lr, ADAM_BETA1, ADAM_BETA2, ADAM_EPS, ADAM_WD, m_corr, v_corr, l->bias->size);
     conv2d_refresh_winograd_weights(lg);
     tensor_gpu_invalidate_cpu(l->weights);
     tensor_gpu_invalidate_cpu(l->bias);
 #else
     for (size_t i = 0; i < l->weights->size; i++) {
-        l->weights->data[i] -= lr * l->d_weights->data[i];
+        float g = l->d_weights->data[i];
+        l->m_weights->data[i] = ADAM_BETA1 * l->m_weights->data[i] + (1.0f - ADAM_BETA1) * g;
+        l->v_weights->data[i] = ADAM_BETA2 * l->v_weights->data[i] + (1.0f - ADAM_BETA2) * g * g;
+        
+        float m_hat = l->m_weights->data[i] * m_corr;
+        float v_hat = l->v_weights->data[i] * v_corr;
+        
+        l->weights->data[i] = (1.0f - lr * ADAM_WD) * l->weights->data[i] - lr * m_hat / (sqrtf(v_hat) + ADAM_EPS);
     }
     for (size_t i = 0; i < l->bias->size; i++) {
-        l->bias->data[i] -= lr * l->d_bias->data[i];
+        float g = l->d_bias->data[i];
+        l->m_bias->data[i] = ADAM_BETA1 * l->m_bias->data[i] + (1.0f - ADAM_BETA1) * g;
+        l->v_bias->data[i] = ADAM_BETA2 * l->v_bias->data[i] + (1.0f - ADAM_BETA2) * g * g;
+        
+        float m_hat = l->m_bias->data[i] * m_corr;
+        float v_hat = l->v_bias->data[i] * v_corr;
+        
+        l->bias->data[i] = (1.0f - lr * ADAM_WD) * l->bias->data[i] - lr * m_hat / (sqrtf(v_hat) + ADAM_EPS);
     }
 #endif
 }
@@ -257,6 +285,10 @@ static void conv2d_destroy(Layer *self) {
     tensor_destroy(l->bias);
     tensor_destroy(l->d_weights);
     tensor_destroy(l->d_bias);
+    tensor_destroy(l->m_weights);
+    tensor_destroy(l->v_weights);
+    tensor_destroy(l->m_bias);
+    tensor_destroy(l->v_bias);
 #ifdef USE_OPENCL
     if (lg->weights_gpu) gpu_buffer_destroy(lg->weights_gpu);
     if (lg->weights_winograd_gpu) gpu_buffer_destroy(lg->weights_winograd_gpu);
@@ -264,6 +296,10 @@ static void conv2d_destroy(Layer *self) {
     if (lg->bias_gpu) gpu_buffer_destroy(lg->bias_gpu);
     if (lg->d_weights_gpu) gpu_buffer_destroy(lg->d_weights_gpu);
     if (lg->d_bias_gpu) gpu_buffer_destroy(lg->d_bias_gpu);
+    if (lg->m_weights_gpu) gpu_buffer_destroy(lg->m_weights_gpu);
+    if (lg->v_weights_gpu) gpu_buffer_destroy(lg->v_weights_gpu);
+    if (lg->m_bias_gpu) gpu_buffer_destroy(lg->m_bias_gpu);
+    if (lg->v_bias_gpu) gpu_buffer_destroy(lg->v_bias_gpu);
     if (lg->input_gpu) gpu_buffer_destroy(lg->input_gpu);
     if (lg->output_gpu) gpu_buffer_destroy(lg->output_gpu);
 #endif
@@ -287,11 +323,19 @@ Layer *layer_conv2d_create(size_t in_channels, size_t out_channels,
     l->bias = tensor_create_1d(out_channels);
     l->d_weights = tensor_create_4d(out_channels, in_channels, kernel_size, kernel_size);
     l->d_bias = tensor_create_1d(out_channels);
+    l->m_weights = tensor_create_4d(out_channels, in_channels, kernel_size, kernel_size);
+    l->v_weights = tensor_create_4d(out_channels, in_channels, kernel_size, kernel_size);
+    l->m_bias = tensor_create_1d(out_channels);
+    l->v_bias = tensor_create_1d(out_channels);
     l->input_cache = NULL;
     
     size_t fan_in = in_channels * kernel_size * kernel_size;
     tensor_he_init(l->weights, fan_in);
     tensor_zero(l->bias);
+    tensor_zero(l->m_weights);
+    tensor_zero(l->v_weights);
+    tensor_zero(l->m_bias);
+    tensor_zero(l->v_bias);
     
 #ifdef USE_OPENCL
     lg->weights_gpu = gpu_buffer_create(l->weights->size * sizeof(float));
@@ -302,10 +346,19 @@ Layer *layer_conv2d_create(size_t in_channels, size_t out_channels,
     lg->bias_gpu = gpu_buffer_create(l->bias->size * sizeof(float));
     lg->d_weights_gpu = gpu_buffer_create(l->d_weights->size * sizeof(float));
     lg->d_bias_gpu = gpu_buffer_create(l->d_bias->size * sizeof(float));
+    lg->m_weights_gpu = gpu_buffer_create(l->m_weights->size * sizeof(float));
+    lg->v_weights_gpu = gpu_buffer_create(l->v_weights->size * sizeof(float));
+    lg->m_bias_gpu = gpu_buffer_create(l->m_bias->size * sizeof(float));
+    lg->v_bias_gpu = gpu_buffer_create(l->v_bias->size * sizeof(float));
+
     gpu_buffer_write(lg->weights_gpu, l->weights->data, l->weights->size * sizeof(float));
     gpu_buffer_write(lg->bias_gpu, l->bias->data, l->bias->size * sizeof(float));
     opencl_zero_buffer(lg->d_weights_gpu, l->d_weights->size);
     opencl_zero_buffer(lg->d_bias_gpu, l->d_bias->size);
+    opencl_zero_buffer(lg->m_weights_gpu, l->m_weights->size);
+    opencl_zero_buffer(lg->v_weights_gpu, l->v_weights->size);
+    opencl_zero_buffer(lg->m_bias_gpu, l->m_bias->size);
+    opencl_zero_buffer(lg->v_bias_gpu, l->v_bias->size);
     conv2d_refresh_winograd_weights(lg);
 #endif
     
@@ -541,6 +594,10 @@ typedef struct {
     GPUBuffer *bias_gpu;
     GPUBuffer *d_weights_gpu;
     GPUBuffer *d_bias_gpu;
+    GPUBuffer *m_weights_gpu;
+    GPUBuffer *v_weights_gpu;
+    GPUBuffer *m_bias_gpu;
+    GPUBuffer *v_bias_gpu;
     GPUBuffer *input_gpu;
     GPUBuffer *output_gpu;
 #endif
@@ -676,21 +733,40 @@ static void dense_zero_grad(Layer *self) {
 #endif
 }
 
-static void dense_update(Layer *self, float lr) {
+static void dense_update(Layer *self, float lr, size_t t) {
     DenseLayerGPU *lg = (DenseLayerGPU *)self->impl;
     DenseLayer *l = &lg->base;
 
+    float m_corr = 1.0f / (1.0f - powf(ADAM_BETA1, (float)t));
+    float v_corr = 1.0f / (1.0f - powf(ADAM_BETA2, (float)t));
+
 #ifdef USE_OPENCL
-    opencl_sgd_update(lg->weights_gpu, lg->d_weights_gpu, lr, l->weights->size);
-    opencl_sgd_update(lg->bias_gpu, lg->d_bias_gpu, lr, l->bias->size);
+    opencl_adamw_update(lg->weights_gpu, lg->d_weights_gpu, lg->m_weights_gpu, lg->v_weights_gpu, 
+                        lr, ADAM_BETA1, ADAM_BETA2, ADAM_EPS, ADAM_WD, m_corr, v_corr, l->weights->size);
+    opencl_adamw_update(lg->bias_gpu, lg->d_bias_gpu, lg->m_bias_gpu, lg->v_bias_gpu, 
+                        lr, ADAM_BETA1, ADAM_BETA2, ADAM_EPS, ADAM_WD, m_corr, v_corr, l->bias->size);
     tensor_gpu_invalidate_cpu(l->weights);
     tensor_gpu_invalidate_cpu(l->bias);
 #else
     for (size_t i = 0; i < l->weights->size; i++) {
-        l->weights->data[i] -= lr * l->d_weights->data[i];
+        float g = l->d_weights->data[i];
+        l->m_weights->data[i] = ADAM_BETA1 * l->m_weights->data[i] + (1.0f - ADAM_BETA1) * g;
+        l->v_weights->data[i] = ADAM_BETA2 * l->v_weights->data[i] + (1.0f - ADAM_BETA2) * g * g;
+        
+        float m_hat = l->m_weights->data[i] * m_corr;
+        float v_hat = l->v_weights->data[i] * v_corr;
+        
+        l->weights->data[i] = (1.0f - lr * ADAM_WD) * l->weights->data[i] - lr * m_hat / (sqrtf(v_hat) + ADAM_EPS);
     }
     for (size_t i = 0; i < l->bias->size; i++) {
-        l->bias->data[i] -= lr * l->d_bias->data[i];
+        float g = l->d_bias->data[i];
+        l->m_bias->data[i] = ADAM_BETA1 * l->m_bias->data[i] + (1.0f - ADAM_BETA1) * g;
+        l->v_bias->data[i] = ADAM_BETA2 * l->v_bias->data[i] + (1.0f - ADAM_BETA2) * g * g;
+        
+        float m_hat = l->m_bias->data[i] * m_corr;
+        float v_hat = l->v_bias->data[i] * v_corr;
+        
+        l->bias->data[i] = (1.0f - lr * ADAM_WD) * l->bias->data[i] - lr * m_hat / (sqrtf(v_hat) + ADAM_EPS);
     }
 #endif
 }
@@ -702,11 +778,19 @@ static void dense_destroy(Layer *self) {
     tensor_destroy(l->bias);
     tensor_destroy(l->d_weights);
     tensor_destroy(l->d_bias);
+    tensor_destroy(l->m_weights);
+    tensor_destroy(l->v_weights);
+    tensor_destroy(l->m_bias);
+    tensor_destroy(l->v_bias);
 #ifdef USE_OPENCL
     if (lg->weights_gpu) gpu_buffer_destroy(lg->weights_gpu);
     if (lg->bias_gpu) gpu_buffer_destroy(lg->bias_gpu);
     if (lg->d_weights_gpu) gpu_buffer_destroy(lg->d_weights_gpu);
     if (lg->d_bias_gpu) gpu_buffer_destroy(lg->d_bias_gpu);
+    if (lg->m_weights_gpu) gpu_buffer_destroy(lg->m_weights_gpu);
+    if (lg->v_weights_gpu) gpu_buffer_destroy(lg->v_weights_gpu);
+    if (lg->m_bias_gpu) gpu_buffer_destroy(lg->m_bias_gpu);
+    if (lg->v_bias_gpu) gpu_buffer_destroy(lg->v_bias_gpu);
     if (lg->input_gpu) gpu_buffer_destroy(lg->input_gpu);
     if (lg->output_gpu) gpu_buffer_destroy(lg->output_gpu);
 #endif
@@ -726,20 +810,36 @@ Layer *layer_dense_create(size_t in_features, size_t out_features) {
     l->bias = tensor_create_1d(out_features);
     l->d_weights = tensor_create_2d(in_features, out_features);
     l->d_bias = tensor_create_1d(out_features);
+    l->m_weights = tensor_create_2d(in_features, out_features);
+    l->v_weights = tensor_create_2d(in_features, out_features);
+    l->m_bias = tensor_create_1d(out_features);
+    l->v_bias = tensor_create_1d(out_features);
     l->input_cache = NULL;
     
     tensor_he_init(l->weights, in_features);
     tensor_zero(l->bias);
+    tensor_zero(l->m_weights);
+    tensor_zero(l->v_weights);
+    tensor_zero(l->m_bias);
+    tensor_zero(l->v_bias);
     
 #ifdef USE_OPENCL
     lg->weights_gpu = gpu_buffer_create(l->weights->size * sizeof(float));
     lg->bias_gpu = gpu_buffer_create(l->bias->size * sizeof(float));
     lg->d_weights_gpu = gpu_buffer_create(l->d_weights->size * sizeof(float));
     lg->d_bias_gpu = gpu_buffer_create(l->d_bias->size * sizeof(float));
+    lg->m_weights_gpu = gpu_buffer_create(l->m_weights->size * sizeof(float));
+    lg->v_weights_gpu = gpu_buffer_create(l->v_weights->size * sizeof(float));
+    lg->m_bias_gpu = gpu_buffer_create(l->m_bias->size * sizeof(float));
+    lg->v_bias_gpu = gpu_buffer_create(l->v_bias->size * sizeof(float));
     gpu_buffer_write(lg->weights_gpu, l->weights->data, l->weights->size * sizeof(float));
     gpu_buffer_write(lg->bias_gpu, l->bias->data, l->bias->size * sizeof(float));
     opencl_zero_buffer(lg->d_weights_gpu, l->d_weights->size);
     opencl_zero_buffer(lg->d_bias_gpu, l->d_bias->size);
+    opencl_zero_buffer(lg->m_weights_gpu, l->m_weights->size);
+    opencl_zero_buffer(lg->v_weights_gpu, l->v_weights->size);
+    opencl_zero_buffer(lg->m_bias_gpu, l->m_bias->size);
+    opencl_zero_buffer(lg->v_bias_gpu, l->v_bias->size);
 #endif
     
     layer->type = LAYER_DENSE;
@@ -750,6 +850,79 @@ Layer *layer_dense_create(size_t in_features, size_t out_features) {
     layer->zero_grad = dense_zero_grad;
     layer->destroy = dense_destroy;
     
+    return layer;
+}
+
+//global average pool (CPU only)
+static Tensor *globalavgpool2d_forward(Layer *self, Tensor *input, int training) {
+    GlobalAvgPool2DLayer *l = (GlobalAvgPool2DLayer *)self->impl;
+    (void)training;
+
+#ifdef USE_OPENCL
+    tensor_to_cpu(input);
+#endif
+
+    l->batch_size = input->shape[0];
+    l->channels = input->shape[1];
+    l->input_h = input->shape[2];
+    l->input_w = input->shape[3];
+
+    Tensor *output = tensor_create_2d(l->batch_size, l->channels);
+    float scale = 1.0f / (float)(l->input_h * l->input_w);
+
+    for (size_t b = 0; b < l->batch_size; b++) {
+        for (size_t c = 0; c < l->channels; c++) {
+            float sum = 0.0f;
+            for (size_t h = 0; h < l->input_h; h++) {
+                for (size_t w = 0; w < l->input_w; w++) {
+                    sum += tensor_get_4d(input, b, c, h, w);
+                }
+            }
+            tensor_set_2d(output, b, c, sum * scale);
+        }
+    }
+
+    return output;
+}
+
+static Tensor *globalavgpool2d_backward(Layer *self, Tensor *grad_output) {
+    GlobalAvgPool2DLayer *l = (GlobalAvgPool2DLayer *)self->impl;
+    Tensor *grad_input = tensor_create_4d(l->batch_size, l->channels, l->input_h, l->input_w);
+    float scale = 1.0f / (float)(l->input_h * l->input_w);
+
+#ifdef USE_OPENCL
+    tensor_to_cpu(grad_output);
+#endif
+
+    for (size_t b = 0; b < l->batch_size; b++) {
+        for (size_t c = 0; c < l->channels; c++) {
+            float grad = tensor_get_2d(grad_output, b, c) * scale;
+            for (size_t h = 0; h < l->input_h; h++) {
+                for (size_t w = 0; w < l->input_w; w++) {
+                    tensor_set_4d(grad_input, b, c, h, w, grad);
+                }
+            }
+        }
+    }
+
+    return grad_input;
+}
+
+static void globalavgpool2d_destroy(Layer *self) {
+    free(self->impl);
+    free(self);
+}
+
+Layer *layer_globalavgpool2d_create(void) {
+    Layer *layer = malloc(sizeof(Layer));
+    GlobalAvgPool2DLayer *l = calloc(1, sizeof(GlobalAvgPool2DLayer));
+    layer->type = LAYER_GLOBALAVGPOOL2D;
+    layer->impl = l;
+    layer->forward = globalavgpool2d_forward;
+    layer->backward = globalavgpool2d_backward;
+    layer->update = NULL;
+    layer->zero_grad = NULL;
+    layer->destroy = globalavgpool2d_destroy;
     return layer;
 }
 

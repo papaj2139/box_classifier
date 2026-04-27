@@ -10,6 +10,7 @@ typedef struct {
     Layer *layers[MAX_LAYERS];
     size_t num_layers;
     Tensor *activations[MAX_LAYERS + 1];
+    size_t t;  //time step for AdamW
 } NeuralNetwork;
 
 //model lifecycle
@@ -40,6 +41,9 @@ typedef struct {
 float loss_bce_batch(Tensor *predicted, Tensor *target, Tensor *grad_out);
 float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
                                   Tensor *grad_out, TrainingMetrics *metrics);
+float loss_bce_logits_batch(Tensor *logits, Tensor *target, Tensor *grad_out);
+float loss_bce_logits_batch_with_metrics(Tensor *logits, Tensor *target,
+                                         Tensor *grad_out, TrainingMetrics *metrics);
 
 //metrics
 void metrics_reset(TrainingMetrics *m);

@@ -922,11 +922,11 @@ __kernel void conv2d_backward_weights_winograd_3x3(
         float d[4][4] = {0};
         float e2[2][2] = {0};
         for (int i = 0; i < 4; i++) {
-            int oh = ty * 2 + i - 1;
+            int ih = ty * 2 + i - 1;
             for (int j = 0; j < 4; j++) {
-                int ow = tx * 2 + j - 1;
-                if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
-                    d[i][j] = input_cache[in_base + oh * in_w + ow];
+                int iw = tx * 2 + j - 1;
+                if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                    d[i][j] = input_cache[in_base + ih * in_w + iw];
                 }
             }
         }
@@ -1252,17 +1252,35 @@ __kernel void dense_backward_bias(
     d_bias[j] += sum;
 }
 
-//sgd update
-__kernel void sgd_update(
+//adamw update
+__kernel void adamw_update(
     __global float *weights,
     __global const float *gradients,
+    __global float *m,
+    __global float *v,
     const float lr,
+    const float beta1,
+    const float beta2,
+    const float eps,
+    const float wd,
+    const float m_corr,
+    const float v_corr,
     const int n
 ) {
     int gid = get_global_id(0);
     if (gid >= n) return;
     
-    weights[gid] -= lr * gradients[gid];
+    float g = gradients[gid];
+    float mt = beta1 * m[gid] + (1.0f - beta1) * g;
+    float vt = beta2 * v[gid] + (1.0f - beta2) * g * g;
+    
+    m[gid] = mt;
+    v[gid] = vt;
+    
+    float m_hat = mt * m_corr;
+    float v_hat = vt * v_corr;
+    
+    weights[gid] = (1.0f - lr * wd) * weights[gid] - lr * m_hat / (sqrt(v_hat) + eps);
 }
 
 //zero buffer

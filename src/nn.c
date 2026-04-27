@@ -8,6 +8,7 @@
 #endif
 
 static const char *layer_type_name(LayerType type);
+static float sigmoid_scalar(float x);
 
 //model lifecycle
 NeuralNetwork *nn_create(void) {
@@ -76,9 +77,10 @@ void nn_backward(NeuralNetwork *nn, Tensor *grad_loss) {
 }
 
 void nn_update(NeuralNetwork *nn, float learning_rate) {
+    nn->t++;
     for (size_t i = 0; i < nn->num_layers; i++) {
         if (nn->layers[i]->update) {
-            nn->layers[i]->update(nn->layers[i], learning_rate);
+            nn->layers[i]->update(nn->layers[i], learning_rate, nn->t);
         }
     }
 }
@@ -94,9 +96,15 @@ void nn_zero_gradients(NeuralNetwork *nn) {
 //batched loss functions
 float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
                                   Tensor *grad_out, TrainingMetrics *metrics);
+float loss_bce_logits_batch_with_metrics(Tensor *logits, Tensor *target,
+                                         Tensor *grad_out, TrainingMetrics *metrics);
 
 float loss_bce_batch(Tensor *predicted, Tensor *target, Tensor *grad_out) {
     return loss_bce_batch_with_metrics(predicted, target, grad_out, NULL);
+}
+
+float loss_bce_logits_batch(Tensor *logits, Tensor *target, Tensor *grad_out) {
+    return loss_bce_logits_batch_with_metrics(logits, target, grad_out, NULL);
 }
 
 float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
@@ -114,15 +122,58 @@ float loss_bce_batch_with_metrics(Tensor *predicted, Tensor *target,
         float t = target->data[b];
         
         //clamp to avoid log(0)
-        p = fmaxf(fminf(p, 1.0f - 1e-7f), 1e-7f);
+        p = fmaxf(fminf(p, 1.0f - 1e-6f), 1e-6f);
         
         //bce loss
         float loss = -(t * logf(p) + (1.0f - t) * logf(1.0f - p));
         total_loss += loss;
         
         //gradient: d/dp BCE = (p - t) / (p * (1 - p)), scaled by 1/B
+        //note: this cancels with the p*(1-p) in sigmoid backward, resulting in (p-t)/B
         if (grad_out) {
-            grad_out->data[b] = scale * (p - t) / (p * (1.0f - p));
+            float denom = p * (1.0f - p);
+            if (denom < 1e-6f) denom = 1e-6f; //keep it stable
+            grad_out->data[b] = scale * (p - t) / denom;
+        }
+
+        if (metrics) {
+            int pred_class = p >= 0.5f ? 1 : 0;
+            int true_class = t >= 0.5f ? 1 : 0;
+            if (pred_class == true_class) {
+                metrics->correct++;
+            }
+        }
+    }
+
+    if (metrics) {
+        metrics->loss += total_loss;
+        metrics->total += B;
+        metrics->accuracy = metrics->total ? (float)metrics->correct / (float)metrics->total : 0.0f;
+    }
+
+    return total_loss / (float)B;
+}
+
+float loss_bce_logits_batch_with_metrics(Tensor *logits, Tensor *target,
+                                         Tensor *grad_out, TrainingMetrics *metrics) {
+    size_t B = logits->shape[0];
+    float total_loss = 0.0f;
+    float scale = 1.0f / (float)B;
+
+#ifdef USE_OPENCL
+    tensor_to_cpu(logits);
+#endif
+
+    for (size_t b = 0; b < B; b++) {
+        float z = logits->data[b];
+        float t = target->data[b];
+        float p = sigmoid_scalar(z);
+        float p_clamped = fmaxf(fminf(p, 1.0f - 1e-6f), 1e-6f);
+        float loss = -(t * logf(p_clamped) + (1.0f - t) * logf(1.0f - p_clamped));
+        total_loss += loss;
+
+        if (grad_out) {
+            grad_out->data[b] = scale * (p - t);
         }
 
         if (metrics) {
@@ -181,6 +232,7 @@ static const char *layer_type_name(LayerType type) {
         case LAYER_CONV2D: return "Conv2D";
         case LAYER_MAXPOOL2D: return "MaxPool2D";
         case LAYER_DENSE: return "Dense";
+        case LAYER_GLOBALAVGPOOL2D: return "GlobalAvgPool2D";
         case LAYER_FLATTEN: return "Flatten";
         case LAYER_RELU: return "ReLU";
         case LAYER_SIGMOID: return "Sigmoid";
@@ -250,6 +302,8 @@ int nn_save(NeuralNetwork *nn, const char *filepath) {
             MaxPool2DLayer *m = (MaxPool2DLayer *)l->impl;
             fwrite(&m->pool_size, sizeof(size_t), 1, f);
             fwrite(&m->stride, sizeof(size_t), 1, f);
+        } else if (l->type == LAYER_GLOBALAVGPOOL2D) {
+            // stateless layer
         } else if (l->type == LAYER_DROPOUT) {
             DropoutLayer *d = (DropoutLayer *)l->impl;
             fwrite(&d->p, sizeof(float), 1, f);
@@ -311,6 +365,8 @@ NeuralNetwork *nn_load(const char *filepath) {
             fread(&ps, sizeof(size_t), 1, f);
             fread(&s, sizeof(size_t), 1, f);
             l = layer_maxpool2d_create(ps, s);
+        } else if (type == LAYER_GLOBALAVGPOOL2D) {
+            l = layer_globalavgpool2d_create();
         } else if (type == LAYER_FLATTEN) {
             l = layer_flatten_create();
         } else if (type == LAYER_RELU) {
@@ -328,4 +384,13 @@ NeuralNetwork *nn_load(const char *filepath) {
     
     fclose(f);
     return nn;
+}
+
+static float sigmoid_scalar(float x) {
+    if (x >= 0.0f) {
+        float e = expf(-x);
+        return 1.0f / (1.0f + e);
+    }
+    float e = expf(x);
+    return e / (1.0f + e);
 }

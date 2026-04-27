@@ -13,7 +13,6 @@ static int rand_initialized = 0;
 
 static void ensure_rand_init(void) {
     if (!rand_initialized) {
-        srand((unsigned int)time(NULL));
         rand_initialized = 1;
     }
 }

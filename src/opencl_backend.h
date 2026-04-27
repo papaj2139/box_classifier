@@ -39,7 +39,7 @@ typedef struct {
     cl_kernel dropout_forward_kernel;
     cl_kernel maxpool_forward_kernel;
     cl_kernel maxpool_backward_kernel;
-    cl_kernel sgd_update_kernel;
+    cl_kernel adamw_update_kernel;
     cl_kernel zero_buffer_kernel;
     
     int initialized;
@@ -115,7 +115,8 @@ void opencl_dense_backward_weights(GPUBuffer *input_cache, GPUBuffer *grad_outpu
 void opencl_dense_backward_bias(GPUBuffer *grad_output, GPUBuffer *d_bias,
                                 size_t B, size_t out_f);
 
-void opencl_sgd_update(GPUBuffer *weights, GPUBuffer *gradients, float lr, size_t n);
+void opencl_adamw_update(GPUBuffer *weights, GPUBuffer *gradients, GPUBuffer *m, GPUBuffer *v,
+                         float lr, float beta1, float beta2, float eps, float wd, float m_corr, float v_corr, size_t n);
 
 void opencl_zero_buffer(GPUBuffer *buffer, size_t n);
 

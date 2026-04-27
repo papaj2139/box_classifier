@@ -85,7 +85,7 @@ int opencl_init(void) {
         return -1;
     }
     
-    err = clBuildProgram(g_ctx.program, 1, &g_ctx.device, "-cl-fast-relaxed-math", NULL, NULL);
+    err = clBuildProgram(g_ctx.program, 1, &g_ctx.device, "-cl-mad-enable", NULL, NULL);
     if (err != CL_SUCCESS) {
         //print build log
         size_t log_size;
@@ -121,7 +121,7 @@ int opencl_init(void) {
     g_ctx.dropout_forward_kernel = clCreateKernel(g_ctx.program, "dropout_forward", &err);
     g_ctx.maxpool_forward_kernel = clCreateKernel(g_ctx.program, "maxpool_forward", &err);
     g_ctx.maxpool_backward_kernel = clCreateKernel(g_ctx.program, "maxpool_backward", &err);
-    g_ctx.sgd_update_kernel = clCreateKernel(g_ctx.program, "sgd_update", &err);
+    g_ctx.adamw_update_kernel = clCreateKernel(g_ctx.program, "adamw_update", &err);
     g_ctx.zero_buffer_kernel = clCreateKernel(g_ctx.program, "zero_buffer", &err);
     
     g_ctx.initialized = 1;
@@ -155,7 +155,6 @@ void opencl_cleanup(void) {
     clReleaseKernel(g_ctx.dropout_forward_kernel);
     clReleaseKernel(g_ctx.maxpool_forward_kernel);
     clReleaseKernel(g_ctx.maxpool_backward_kernel);
-    clReleaseKernel(g_ctx.sgd_update_kernel);
     clReleaseKernel(g_ctx.zero_buffer_kernel);
     
     clReleaseProgram(g_ctx.program);
@@ -536,7 +535,6 @@ void opencl_conv2d_backward_weights(GPUBuffer *input_cache, GPUBuffer *grad_outp
     clSetKernelArg(kernel, 1, sizeof(cl_mem), &grad_output->buffer);
     clSetKernelArg(kernel, 2, sizeof(cl_mem), &d_weights->buffer);
     clSetKernelArg(kernel, 3, sizeof(cl_mem), &d_bias->buffer);
-
     if (kernel == g_ctx.conv2d_backward_weights_3x3_ic1_kernel) {
         clSetKernelArg(kernel, 4, sizeof(int), &iB);
         clSetKernelArg(kernel, 5, sizeof(int), &i_out_c);
@@ -612,14 +610,23 @@ void opencl_dense_backward_bias(GPUBuffer *grad_output, GPUBuffer *d_bias,
     clEnqueueNDRangeKernel(g_ctx.queue, kernel, 1, NULL, &global, &local, 0, NULL, NULL);
 }
 
-void opencl_sgd_update(GPUBuffer *weights, GPUBuffer *gradients, float lr, size_t n) {
-    cl_kernel kernel = g_ctx.sgd_update_kernel;
+void opencl_adamw_update(GPUBuffer *weights, GPUBuffer *gradients, GPUBuffer *m, GPUBuffer *v,
+                         float lr, float beta1, float beta2, float eps, float wd, float m_corr, float v_corr, size_t n) {
+    cl_kernel kernel = g_ctx.adamw_update_kernel;
 
     int in = (int)n;
     clSetKernelArg(kernel, 0, sizeof(cl_mem), &weights->buffer);
     clSetKernelArg(kernel, 1, sizeof(cl_mem), &gradients->buffer);
-    clSetKernelArg(kernel, 2, sizeof(float), &lr);
-    clSetKernelArg(kernel, 3, sizeof(int), &in);
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), &m->buffer);
+    clSetKernelArg(kernel, 3, sizeof(cl_mem), &v->buffer);
+    clSetKernelArg(kernel, 4, sizeof(float), &lr);
+    clSetKernelArg(kernel, 5, sizeof(float), &beta1);
+    clSetKernelArg(kernel, 6, sizeof(float), &beta2);
+    clSetKernelArg(kernel, 7, sizeof(float), &eps);
+    clSetKernelArg(kernel, 8, sizeof(float), &wd);
+    clSetKernelArg(kernel, 9, sizeof(float), &m_corr);
+    clSetKernelArg(kernel, 10, sizeof(float), &v_corr);
+    clSetKernelArg(kernel, 11, sizeof(int), &in);
 
     size_t global = round_up(n, 256);
     size_t local = 256;

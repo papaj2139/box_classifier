@@ -10,7 +10,7 @@
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
 
-#define TARGET_SIZE 64
+#define TARGET_SIZE 32
 
 //image loading (supports color, any size  and it converts to  64x64 grayscale)
 Tensor *load_png_grayscale(const char *filepath) {
@@ -63,11 +63,11 @@ Tensor *load_png_grayscale(const char *filepath) {
     //create tensor [1, 64, 64]
     Tensor *t = tensor_create_3d(1, (size_t)final_h, (size_t)final_w);
     
-    //normalize to [0, 1]
+    //normalize to [-1, 1] by centering around 0.5
     for (int y = 0; y < final_h; y++) {
         for (int x = 0; x < final_w; x++) {
             float val = (float)gray[y * final_w + x] / 255.0f;
-            tensor_set_3d(t, 0, (size_t)y, (size_t)x, val);
+            tensor_set_3d(t, 0, (size_t)y, (size_t)x, val * 2.0f - 1.0f);
         }
     }
     
@@ -145,12 +145,7 @@ void dataset_destroy(Dataset *ds) {
 
 //shuffling and iteration
 void dataset_shuffle(Dataset *ds) {
-    static int seeded = 0;
-    if (!seeded) {
-        srand((unsigned int)time(NULL));
-        seeded = 1;
-    }
-    
+    //shuffle using Fisher-Yates
     for (size_t i = ds->count - 1; i > 0; i--) {
         size_t j = (size_t)rand() % (i + 1);
         size_t tmp = ds->shuffle_indices[i];

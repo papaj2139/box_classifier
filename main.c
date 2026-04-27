@@ -6,10 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 
-#define IMAGE_SIZE 64
-#define LEARNING_RATE 0.01f
+#define IMAGE_SIZE 32
+#define LEARNING_RATE 0.001f
 #define EPOCHS 10
 #define BATCH_SIZE 32
 
@@ -17,28 +18,27 @@
 NeuralNetwork *build_model(void) {
     NeuralNetwork *nn = nn_create();
     
-    //input: [B, 1, 64, 64]
+    //input: [B, 1, 32, 32]
     
-    //conv block 1: 1 -> 16 channels
-    nn_add_layer(nn, layer_conv2d_create(1, 16, 3, 1, 1)); //-> [B, 16, 64, 64]
-    nn_add_layer(nn, layer_relu_create());
-    nn_add_layer(nn, layer_maxpool2d_create(2, 2)); //-> [B, 16, 32, 32]
-    
-    //conv block 2: 16 -> 32 channels
-    nn_add_layer(nn, layer_conv2d_create(16, 32, 3, 1, 1)); //-> [B, 32, 32, 32]
+    //conv block 1: 1 -> 32 channels
+    nn_add_layer(nn, layer_conv2d_create(1, 32, 3, 1, 1)); //-> [B, 32, 32, 32]
     nn_add_layer(nn, layer_relu_create());
     nn_add_layer(nn, layer_maxpool2d_create(2, 2)); //-> [B, 32, 16, 16]
     
-    //flatten: [B, 32, 16, 16] -> [B, 8192]
-    nn_add_layer(nn, layer_flatten_create());
+    //conv block 2: 32 -> 128 channels
+    nn_add_layer(nn, layer_conv2d_create(32, 128, 3, 1, 1)); //-> [B, 128, 16, 16]
+    nn_add_layer(nn, layer_relu_create());
+    nn_add_layer(nn, layer_maxpool2d_create(2, 2)); //-> [B, 128, 8, 8]
     
-    //dense layers
-    nn_add_layer(nn, layer_dense_create(32 * 16 * 16, 64)); //--> [B, 64]
+    //reduce the spatial dimensions before the classifier head
+    nn_add_layer(nn, layer_globalavgpool2d_create()); //-> [B, 128]
+    
+    //dense classifier head
+    nn_add_layer(nn, layer_dense_create(128, 512)); //-> [B, 512]
     nn_add_layer(nn, layer_relu_create());
     nn_add_layer(nn, layer_dropout_create(0.3f));
     
-    nn_add_layer(nn, layer_dense_create(64, 1)); //-> [B, 1]
-    nn_add_layer(nn, layer_sigmoid_create());
+    nn_add_layer(nn, layer_dense_create(512, 1)); //-> [B, 1] logits
     
     return nn;
 }
@@ -61,14 +61,9 @@ void train_epoch(NeuralNetwork *nn, Dataset *train, TrainingMetrics *metrics) {
         
         //forward pass with batch
         Tensor *output = nn_forward(nn, images, 1);
-        //compute batched loss and gradients
-        Tensor *grad = tensor_create_1d(actual_batch);
-        loss_bce_batch_with_metrics(output, labels, grad, metrics);
-
-        //backward pass
-        //need to reshape grad to [B, 1] for backward through sigmoid
+        //compute BCE-with-logits loss and gradient directly on logits
         Tensor *grad_reshaped = tensor_create_2d(actual_batch, 1);
-        memcpy(grad_reshaped->data, grad->data, actual_batch * sizeof(float));
+        loss_bce_logits_batch_with_metrics(output, labels, grad_reshaped, metrics);
         
         nn_backward(nn, grad_reshaped);
 
@@ -78,7 +73,6 @@ void train_epoch(NeuralNetwork *nn, Dataset *train, TrainingMetrics *metrics) {
         //cleanup batch tensors
         tensor_destroy(images);
         tensor_destroy(labels);
-        tensor_destroy(grad);
         tensor_destroy(grad_reshaped);
         
         //progress
@@ -102,7 +96,7 @@ void evaluate(NeuralNetwork *nn, Dataset *test, TrainingMetrics *metrics) {
     while ((actual_batch = dataset_get_batch(test, BATCH_SIZE, &images, &labels)) > 0) {
         Tensor *output = nn_forward(nn, images, 0);
         
-        loss_bce_batch_with_metrics(output, labels, NULL, metrics);
+        loss_bce_logits_batch_with_metrics(output, labels, NULL, metrics);
         
         tensor_destroy(images);
         tensor_destroy(labels);
@@ -110,6 +104,9 @@ void evaluate(NeuralNetwork *nn, Dataset *test, TrainingMetrics *metrics) {
 }
 
 int main(int argc, char **argv) {
+    //set seed for reproducibiliy
+    srand(1);
+    
     const char *data_dir = "dataset/wild";
     const char *labels_file = "dataset/wild/labels.txt";
     const char *model_file = "model.bin";
@@ -208,7 +205,8 @@ int main(int argc, char **argv) {
 #ifdef USE_OPENCL
         tensor_to_cpu(output);
 #endif
-        float pred = output->data[0];
+        float logit = output->data[0];
+        float pred = 1.0f / (1.0f + expf(-logit));
         
         printf("\nPrediction: %.4f\n", pred);
         printf("Class: %s (confidence: %.1f%%)\n", 
